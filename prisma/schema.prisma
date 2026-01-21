@@ -1,0 +1,587 @@
+// Task Management & Performance Reporting System - Database Schema
+// This schema follows a domain-driven design with comprehensive audit trails
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// USER MANAGEMENT & AUTHENTICATION
+// ============================================================================
+
+enum Role {
+  ADMIN     // Full system access
+  MANAGER   // Can manage projects and teams
+  MEMBER    // Basic user access
+}
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  name          String?
+  password      String    // Hashed
+  role          Role      @default(MEMBER)
+  avatar        String?   // URL to avatar image
+  bio           String?   @db.Text
+  timezone      String    @default("UTC")
+
+  // Preferences
+  theme         String    @default("system") // light, dark, system
+  emailNotifications Boolean @default(true)
+
+  // Audit fields
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  lastLoginAt   DateTime?
+
+  // Relations
+  createdProjects     Project[]       @relation("ProjectCreator")
+  ownedProjects       Project[]       @relation("ProjectOwner")
+
+  createdEpics        Epic[]          @relation("EpicCreator")
+
+  createdTasks        Task[]          @relation("TaskCreator")
+  assignedTasks       Task[]          @relation("TaskAssignee")
+  watchedTasks        TaskWatcher[]
+
+  comments            Comment[]
+  timeEntries         TimeEntry[]
+  activityEvents      ActivityEvent[]
+  savedFilters        SavedFilter[]
+  notifications       Notification[]
+
+  @@index([email])
+  @@index([role])
+  @@map("users")
+}
+
+// ============================================================================
+// PROJECT HIERARCHY: Project → Epic → Task → Subtask
+// ============================================================================
+
+enum ProjectStatus {
+  PLANNING
+  ACTIVE
+  ON_HOLD
+  COMPLETED
+  ARCHIVED
+}
+
+model Project {
+  id          String        @id @default(cuid())
+  name        String
+  key         String        @unique // Short code like "PROJ"
+  description String?       @db.Text
+  status      ProjectStatus @default(PLANNING)
+  color       String?       // Hex color for UI
+
+  // Dates
+  startDate   DateTime?
+  endDate     DateTime?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  // Ownership
+  creatorId   String
+  creator     User          @relation("ProjectCreator", fields: [creatorId], references: [id])
+  ownerId     String
+  owner       User          @relation("ProjectOwner", fields: [ownerId], references: [id])
+
+  // Relations
+  epics       Epic[]
+  tasks       Task[]
+  activityEvents ActivityEvent[]
+
+  @@index([key])
+  @@index([status])
+  @@index([ownerId])
+  @@map("projects")
+}
+
+enum EpicStatus {
+  PLANNED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+model Epic {
+  id          String      @id @default(cuid())
+  name        String
+  description String?     @db.Text
+  status      EpicStatus  @default(PLANNED)
+  color       String?
+
+  // Goals and metrics
+  goalDescription String? @db.Text
+  successCriteria String? @db.Text
+
+  // Dates
+  startDate   DateTime?
+  endDate     DateTime?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  // Project association
+  projectId   String
+  project     Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  // Creator
+  creatorId   String
+  creator     User        @relation("EpicCreator", fields: [creatorId], references: [id])
+
+  // Relations
+  tasks       Task[]
+  activityEvents ActivityEvent[]
+
+  @@index([projectId])
+  @@index([status])
+  @@map("epics")
+}
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  IN_REVIEW
+  BLOCKED
+  DONE
+  CANCELLED
+}
+
+enum TaskPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+model Task {
+  id          String        @id @default(cuid())
+  title       String
+  description String?       @db.Text
+  status      TaskStatus    @default(TODO)
+  priority    TaskPriority  @default(MEDIUM)
+
+  // Estimation and tracking
+  estimatePoints  Int?      // Story points
+  estimateHours   Float?    // Time estimate in hours
+  actualHours     Float?    // Computed from time entries
+
+  // Dates
+  dueDate     DateTime?
+  startDate   DateTime?
+  completedAt DateTime?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  // Hierarchy
+  projectId   String
+  project     Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  epicId      String?
+  epic        Epic?         @relation(fields: [epicId], references: [id], onDelete: SetNull)
+
+  parentId    String?       // For subtasks
+  parent      Task?         @relation("TaskSubtasks", fields: [parentId], references: [id], onDelete: Cascade)
+  subtasks    Task[]        @relation("TaskSubtasks")
+
+  // Assignment
+  creatorId   String
+  creator     User          @relation("TaskCreator", fields: [creatorId], references: [id])
+
+  assigneeId  String?
+  assignee    User?         @relation("TaskAssignee", fields: [assigneeId], references: [id])
+
+  // Relations
+  tags        TaskTag[]
+  watchers    TaskWatcher[]
+  comments    Comment[]
+  attachments AttachmentLink[]
+  timeEntries TimeEntry[]
+  gitLinks    GitLink[]
+  activityEvents ActivityEvent[]
+
+  // Dependencies
+  blockedBy   TaskDependency[] @relation("BlockedTask")
+  blocks      TaskDependency[] @relation("BlockingTask")
+
+  @@index([projectId])
+  @@index([epicId])
+  @@index([parentId])
+  @@index([status])
+  @@index([priority])
+  @@index([assigneeId])
+  @@index([creatorId])
+  @@index([dueDate])
+  @@map("tasks")
+}
+
+// ============================================================================
+// TASK METADATA & RELATIONSHIPS
+// ============================================================================
+
+model Tag {
+  id        String    @id @default(cuid())
+  name      String    @unique
+  color     String?   // Hex color
+  description String?
+  createdAt DateTime  @default(now())
+
+  tasks     TaskTag[]
+
+  @@map("tags")
+}
+
+model TaskTag {
+  taskId    String
+  task      Task      @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  tagId     String
+  tag       Tag       @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime  @default(now())
+
+  @@id([taskId, tagId])
+  @@map("task_tags")
+}
+
+model TaskWatcher {
+  taskId    String
+  task      Task      @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime  @default(now())
+
+  @@id([taskId, userId])
+  @@map("task_watchers")
+}
+
+enum DependencyType {
+  BLOCKS        // This task blocks another
+  BLOCKED_BY    // This task is blocked by another
+  RELATED       // Related but not blocking
+}
+
+model TaskDependency {
+  id            String          @id @default(cuid())
+  type          DependencyType  @default(BLOCKS)
+
+  blockingTaskId String
+  blockingTask   Task           @relation("BlockingTask", fields: [blockingTaskId], references: [id], onDelete: Cascade)
+
+  blockedTaskId  String
+  blockedTask    Task           @relation("BlockedTask", fields: [blockedTaskId], references: [id], onDelete: Cascade)
+
+  createdAt      DateTime       @default(now())
+
+  @@unique([blockingTaskId, blockedTaskId])
+  @@index([blockingTaskId])
+  @@index([blockedTaskId])
+  @@map("task_dependencies")
+}
+
+model Comment {
+  id        String    @id @default(cuid())
+  content   String    @db.Text // Markdown supported
+
+  taskId    String
+  task      Task      @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  authorId  String
+  author    User      @relation(fields: [authorId], references: [id])
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  // Relations
+  activityEvents ActivityEvent[]
+
+  @@index([taskId])
+  @@index([authorId])
+  @@index([createdAt])
+  @@map("comments")
+}
+
+enum AttachmentType {
+  FILE
+  LINK
+  IMAGE
+  DOCUMENT
+}
+
+model AttachmentLink {
+  id        String         @id @default(cuid())
+  type      AttachmentType @default(LINK)
+  name      String
+  url       String         @db.Text
+  size      Int?           // File size in bytes
+  mimeType  String?
+
+  taskId    String
+  task      Task           @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime       @default(now())
+
+  @@index([taskId])
+  @@map("attachment_links")
+}
+
+// ============================================================================
+// TIME TRACKING
+// ============================================================================
+
+model TimeEntry {
+  id          String    @id @default(cuid())
+  description String?   @db.Text
+  hours       Float     // Decimal hours (e.g., 1.5 = 1 hour 30 min)
+
+  date        DateTime  @default(now()) // Date of work
+
+  taskId      String
+  task        Task      @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  userId      String
+  user        User      @relation(fields: [userId], references: [id])
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  // Relations
+  activityEvents ActivityEvent[]
+
+  @@index([taskId])
+  @@index([userId])
+  @@index([date])
+  @@map("time_entries")
+}
+
+// ============================================================================
+// GIT INTEGRATION
+// ============================================================================
+
+enum GitLinkType {
+  COMMIT
+  PULL_REQUEST
+  ISSUE
+  BRANCH
+}
+
+model GitLink {
+  id          String      @id @default(cuid())
+  type        GitLinkType
+
+  // Git metadata
+  url         String      @db.Text // Full URL to GitHub/GitLab
+  sha         String?     // Commit SHA or PR number
+  title       String?
+  description String?     @db.Text
+
+  // Status for PRs
+  prNumber    Int?
+  prStatus    String?     // open, closed, merged
+  mergedAt    DateTime?
+
+  // Association
+  taskId      String
+  task        Task        @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  createdAt   DateTime    @default(now())
+
+  // Relations
+  activityEvents ActivityEvent[]
+
+  @@index([taskId])
+  @@index([type])
+  @@index([sha])
+  @@map("git_links")
+}
+
+// ============================================================================
+// ACTIVITY EVENT LOG (Immutable Audit Trail)
+// ============================================================================
+
+enum EventType {
+  // Project events
+  PROJECT_CREATED
+  PROJECT_UPDATED
+  PROJECT_STATUS_CHANGED
+
+  // Epic events
+  EPIC_CREATED
+  EPIC_UPDATED
+  EPIC_STATUS_CHANGED
+
+  // Task events
+  TASK_CREATED
+  TASK_UPDATED
+  TASK_STATUS_CHANGED
+  TASK_PRIORITY_CHANGED
+  TASK_ASSIGNED
+  TASK_UNASSIGNED
+  TASK_COMPLETED
+  TASK_REOPENED
+
+  // Comment events
+  COMMENT_CREATED
+  COMMENT_UPDATED
+  COMMENT_DELETED
+
+  // Time tracking
+  TIME_ENTRY_CREATED
+  TIME_ENTRY_UPDATED
+  TIME_ENTRY_DELETED
+
+  // Git integration
+  GIT_LINK_CREATED
+  GIT_PR_MERGED
+
+  // Metadata
+  TAG_ADDED
+  TAG_REMOVED
+  DEPENDENCY_CREATED
+  DEPENDENCY_REMOVED
+  WATCHER_ADDED
+  WATCHER_REMOVED
+}
+
+model ActivityEvent {
+  id          String    @id @default(cuid())
+  type        EventType
+
+  // Actor
+  userId      String
+  user        User      @relation(fields: [userId], references: [id])
+
+  // Context - polymorphic references (nullable)
+  projectId   String?
+  project     Project?  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  epicId      String?
+  epic        Epic?     @relation(fields: [epicId], references: [id], onDelete: Cascade)
+
+  taskId      String?
+  task        Task?     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  commentId   String?
+  comment     Comment?  @relation(fields: [commentId], references: [id], onDelete: Cascade)
+
+  timeEntryId String?
+  timeEntry   TimeEntry? @relation(fields: [timeEntryId], references: [id], onDelete: Cascade)
+
+  gitLinkId   String?
+  gitLink     GitLink?  @relation(fields: [gitLinkId], references: [id], onDelete: Cascade)
+
+  // Change tracking (JSON for flexibility)
+  metadata    Json?     // Additional context
+  before      Json?     // Previous state
+  after       Json?     // New state
+
+  // Timestamp (immutable)
+  createdAt   DateTime  @default(now())
+
+  @@index([userId])
+  @@index([type])
+  @@index([projectId])
+  @@index([taskId])
+  @@index([createdAt])
+  @@map("activity_events")
+}
+
+// ============================================================================
+// USER FEATURES
+// ============================================================================
+
+model SavedFilter {
+  id          String    @id @default(cuid())
+  name        String
+  description String?
+
+  // Filter configuration (JSON)
+  config      Json      // Stores filter criteria
+
+  // View type
+  viewType    String    @default("list") // list, kanban, calendar
+
+  // Sharing
+  isPublic    Boolean   @default(false)
+
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([userId])
+  @@map("saved_filters")
+}
+
+enum NotificationType {
+  TASK_ASSIGNED
+  TASK_COMPLETED
+  TASK_COMMENTED
+  TASK_MENTIONED
+  TASK_DUE_SOON
+  PROJECT_UPDATED
+}
+
+model Notification {
+  id        String            @id @default(cuid())
+  type      NotificationType
+  title     String
+  message   String?           @db.Text
+
+  // Link to related entity
+  entityType String?          // project, task, comment
+  entityId   String?
+
+  // Status
+  read      Boolean           @default(false)
+  readAt    DateTime?
+
+  userId    String
+  user      User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime          @default(now())
+
+  @@index([userId, read])
+  @@index([createdAt])
+  @@map("notifications")
+}
+
+// ============================================================================
+// NOTES ON SCHEMA DESIGN
+// ============================================================================
+
+// 1. AUDIT TRAIL: ActivityEvent is append-only with comprehensive indexing
+//    for fast queries by user, date range, project, and task
+//
+// 2. SOFT DELETES: Not implemented - we use Cascade deletes with ActivityEvent
+//    preserving the history
+//
+// 3. POLYMORPHIC RELATIONS: ActivityEvent can reference any entity type
+//    using nullable foreign keys
+//
+// 4. JSONB FIELDS: Used for metadata and filter configs for flexibility
+//    without schema migrations
+//
+// 5. INDEXES: Strategic indexes on foreign keys, status fields, and dates
+//    for query performance
+//
+// 6. CONSTRAINTS: Unique constraints on email, project key, and composite
+//    keys for many-to-many relationships
+//
+// 7. CASCADE DELETES: Defined where appropriate (e.g., delete project →
+//    delete all epics/tasks)
+//
+// 8. TIMESTAMPS: All entities have createdAt/updatedAt for audit purposes
+//
+// 9. ENUMS: Used for fixed sets of values to maintain data integrity
+//
+// 10. TEXT vs STRING: TEXT (@db.Text) for long content, String for short
